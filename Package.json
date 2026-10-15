@@ -1,0 +1,1 @@
+{"dependencies":{"playwright":"^1.40.0"},"description":"HLS URL scraper for Arenaflix using Playwright","name":"arenaflix-hls-scraper","scripts":{"scrape":"node scripts/scrape-playwright.js","scrape:py":"python3 scripts/scrape.py"},"version":"1.0.0"} 
