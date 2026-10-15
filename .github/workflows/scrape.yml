@@ -1,0 +1,30 @@
+name: Scrape HLS URLs
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: |
+          npm install
+          npx playwright install chromium --with-deps
+      - name: Run Playwright scraper
+        run: node scripts/scrape-playwright.js
+        timeout-minutes: 30
+      - name: Commit and push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add hls/
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update HLS URLs $(date -u +%Y-%m-%d)"
+          git push
