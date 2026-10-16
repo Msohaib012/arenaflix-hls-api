@@ -21,6 +21,25 @@ const TEST_MOVIES = [
 const BASE_DIR = path.join(__dirname, '..', 'hls');
 
 /**
+ * Extract direct URL from proxy URLs like:
+ * https://p1.mov2day.xyz/proxy?url=<encoded>&data=<b64>&type=...
+ * Returns the decoded direct URL, or the original if not a proxy URL.
+ */
+function extractDirectUrl(url) {
+  try {
+    if (url.includes('/proxy?url=')) {
+      const u = new URL(url);
+      const direct = u.searchParams.get('url');
+      if (direct && direct.startsWith('http')) {
+        console.log(`  Extracted direct URL from proxy`);
+        return direct;
+      }
+    }
+  } catch (e) {}
+  return url;
+}
+
+/**
  * Extract m3u8 URL from Videasy embed page
  */
 async function scrapeVideasy(page, tmdbId) {
@@ -106,6 +125,9 @@ async function scrapeMovie(browser, tmdbId) {
     console.log(`  Trying VidSrc fallback...`);
     url = await scrapeVidSrc(page, tmdbId);
   }
+
+  // Extract direct URL from proxy URLs (proxies get 403, direct works with headers)
+  if (url) url = extractDirectUrl(url);
 
   await context.close();
   return url;
