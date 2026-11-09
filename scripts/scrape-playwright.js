@@ -40,6 +40,118 @@ function extractDirectUrl(url) {
 }
 
 /**
+ * Videasy direct API (Nov 2026): the player page no longer requests any
+ * .m3u8 — it fetches an encrypted payload from api.speedracelight.com
+ * and decrypts it locally. This mirrors the current open-source
+ * extractors (MaxStream's VideasyExtractor, TMDB-Embed-API's
+ * providers/videasy.js): GET /seed?mediaId=, then
+ * /{route}/sources-with-title?...&enc=2&seed=, then XOR-decrypt with
+ * the seed cipher below (plaintext starts with the "mvm1" magic).
+ */
+const VIDEASY_API = 'https://api.speedracelight.com';
+const VIDEASY_API_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+  'Accept': 'application/json',
+  'Origin': 'https://player.videasy.to',
+  'Referer': 'https://player.videasy.to/',
+};
+const VIDEASY_ROUTES = ['cdn', 'm4uhd', 'lamovie', 'meine'];
+const _MAGIC = [109, 118, 109, 49]; // "mvm1"
+const _HASH_TABLE = [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580];
+const _u32x = x => x >>> 0;
+const _mul32 = (a, b) => Math.imul(a, b) >>> 0;
+function _rotl32(x, n) { x >>>= 0; n &= 31; return n === 0 ? x : ((x << n) | (x >>> (32 - n))) >>> 0; }
+function _hash32(x) { x = _u32x(x); x ^= x >>> 16; x = _mul32(x, 2246822507); x ^= x >>> 13; x = _mul32(x, 3266489909); x ^= x >>> 16; return _u32x(x); }
+function _fnv1a(str) { let h = 2166136261; for (let i = 0; i < str.length; i++) h = _mul32(h ^ str.charCodeAt(i), 16777619); return _hash32(h); }
+function _initStream(seed, secondKey) {
+  const S = new Array(61);
+  let a = _u32x(_hash32(_fnv1a(seed) ^ _hash32(_u32x((secondKey >>> 0) ^ 2654435769))));
+  for (let i = 0; i < 8; i++) {
+    if ((i * (i + 1) & 1) === 0) {
+      const idx = a % 61;
+      a = _rotl32(a + _u32x(2654435769), 7 + (7 & i));
+      S[idx] = _u32x(a ^ _hash32(a));
+      a = _hash32(_u32x(a + idx));
+    } else {
+      S[i] = _HASH_TABLE[15 & i];
+    }
+  }
+  return { S, acc: _u32x(_hash32(2779096485 ^ a)) };
+}
+function _nextByte(st, ctr) {
+  const r = st.S; const o = st.acc; const n = o % 61;
+  const inSet = 0 - Number(n in r);
+  const d = r[n] >>> 0;
+  const x = _u32x(d ^ _mul32(2654435769, ctr + 1));
+  const y = _u32x((o ^ x) | (o & x & inSet));
+  const no = _hash32(_u32x(_rotl32(_u32x(y + o), 31 & n) ^ _rotl32(o, 31 & Math.imul(n, 7))) + 2654435769);
+  r[n] = no >>> 0; st.acc = no; return no >>> 0;
+}
+function _keystream(seed, secondKey, len) {
+  const st = _initStream(seed, secondKey);
+  const out = new Uint8Array(len); let ctr = 0;
+  for (let i = 0; i < len;) {
+    const b = _nextByte(st, ctr++);
+    out[i++] = 255 & b;
+    if (i < len) out[i++] = (b >>> 8) & 255;
+    if (i < len) out[i++] = (b >>> 16) & 255;
+    if (i < len) out[i++] = (b >>> 24) & 255;
+  }
+  return out;
+}
+function decryptVideasyPayload(payload, seed, secondKey) {
+  const b64 = payload.replace(/-/g, '+').replace(/_/g, '/').padEnd(4 * Math.ceil(payload.length / 4), '=');
+  const data = Buffer.from(b64, 'base64');
+  const ks = _keystream(seed, secondKey, data.length);
+  for (let i = 0; i < data.length; i++) data[i] ^= ks[i];
+  for (let i = 0; i < _MAGIC.length; i++) {
+    if (data[i] !== _MAGIC[i]) throw new Error('Invalid encrypted payload');
+  }
+  return data.subarray(_MAGIC.length).toString('utf8');
+}
+
+async function scrapeVideasyApi(tmdbId) {
+  try {
+    const seedRes = await fetch(`${VIDEASY_API}/seed?mediaId=${tmdbId}`, { headers: VIDEASY_API_HEADERS });
+    const seedText = await seedRes.text();
+    console.log(`  Videasy API seed: HTTP ${seedRes.status}`);
+    if (!seedRes.ok) return null;
+    const seed = JSON.parse(seedText).seed;
+    if (!seed) return null;
+    for (const route of VIDEASY_ROUTES) {
+      try {
+        const url = `${VIDEASY_API}/${route}/sources-with-title?mediaType=movie&tmdbId=${tmdbId}&enc=2&seed=${encodeURIComponent(seed)}`;
+        const res = await fetch(url, { headers: VIDEASY_API_HEADERS });
+        const text = await res.text();
+        if (!res.ok || !text || text.length < 20 || text.startsWith('<')) {
+          console.log(`  Videasy API ${route}: HTTP ${res.status}, no payload`);
+          continue;
+        }
+        const data = JSON.parse(decryptVideasyPayload(text, seed, String(tmdbId)));
+        const sources = Array.isArray(data.sources) ? data.sources.filter(s => s && s.url) : [];
+        if (!sources.length) {
+          console.log(`  Videasy API ${route}: decrypted, 0 sources`);
+          continue;
+        }
+        if (data.playlist) {
+          console.log(`  Videasy API ${route}: playlist found`);
+          return data.playlist;
+        }
+        sources.sort((a, b) => (parseInt(String(b.quality || '').match(/\d{3,4}/)?.[0] || '0', 10)
+          - parseInt(String(a.quality || '').match(/\d{3,4}/)?.[0] || '0', 10)));
+        console.log(`  Videasy API ${route}: ${sources.length} source(s), best ${sources[0].quality || 'Auto'}`);
+        return sources[0].url;
+      } catch (e) {
+        console.log(`  Videasy API ${route} failed: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    console.log(`  Videasy API failed: ${e.message}`);
+  }
+  return null;
+}
+
+/**
  * Extract m3u8 URL from Videasy embed page
  */
 async function scrapeVideasy(page, tmdbId) {
@@ -110,6 +222,18 @@ async function scrapeVidSrc(page, tmdbId) {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(8000);
       if (m3u8Urls.length > 0) return m3u8Urls[0];
+      // The embed now opens on a poster whose Play control sits inside
+      // nested iframes — a top-frame click never reaches it. Try every
+      // frame's play control, then a plain centre click.
+      for (const frame of page.frames()) {
+        try {
+          await frame.click('button[class*="play"], [aria-label*="Play"], [class*="play-button"], div[class*="play"]', { timeout: 1500 });
+          console.log(`  Clicked play inside a frame on ${domain}`);
+          break;
+        } catch (e) { /* not this frame */ }
+      }
+      await page.waitForTimeout(8000);
+      if (m3u8Urls.length > 0) return m3u8Urls[0];
     } catch (e) {
       console.log(`  ${domain} failed: ${e.message}`);
     }
@@ -129,8 +253,15 @@ async function scrapeMovie(browser, tmdbId) {
   });
   const page = await context.newPage();
 
-  // Try Videasy first (has Hindi+English audio)
-  let url = await scrapeVideasy(page, tmdbId);
+  // Videasy direct API first (the page lane below is a legacy fallback —
+  // since the .to move the player resolves streams via the encrypted
+  // API, not via page network traffic)
+  let url = await scrapeVideasyApi(tmdbId);
+
+  // Legacy Videasy page scrape
+  if (!url) {
+    url = await scrapeVideasy(page, tmdbId);
+  }
 
   // Fallback to VidSrc
   if (!url) {
