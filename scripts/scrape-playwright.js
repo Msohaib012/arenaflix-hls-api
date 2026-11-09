@@ -56,8 +56,14 @@ async function scrapeVideasy(page, tmdbId) {
     }
   });
 
-  try {
-    const url = `https://player.videasy.net/movie/${tmdbId}`;
+  // Videasy moved player.videasy.net -> player.videasy.to in early
+  // Nov 2026 (the .net host 301-redirects to .to behind a broken TLS
+  // setup, which killed every run from 2026-11-07). Try the current
+  // domain first, then the old one in case it is ever restored.
+  const hosts = ['https://player.videasy.to', 'https://player.videasy.net'];
+  for (const host of hosts) {
+   try {
+    const url = `${host}/movie/${tmdbId}`;
     console.log(`  Visiting: ${url}`);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     // Wait for player to load and make requests
@@ -71,11 +77,12 @@ async function scrapeVideasy(page, tmdbId) {
       // No play button or already playing
     }
 
-    return m3u8Urls[0] || null;
+    if (m3u8Urls.length > 0) return m3u8Urls[0];
   } catch (e) {
-    console.log(`  Videasy failed: ${e.message}`);
-    return null;
+    console.log(`  Videasy failed on ${host}: ${e.message}`);
   }
+  }
+  return m3u8Urls[0] || null;
 }
 
 /**
@@ -114,6 +121,11 @@ async function scrapeMovie(browser, tmdbId) {
   console.log(`\nScraping movie ${tmdbId}...`);
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    // Embed hosts keep breaking their TLS chains (Videasy .net threw
+    // ERR_CERT_AUTHORITY_INVALID on the runner); the scraper only
+    // watches responses for .m3u8 URLs, so TLS errors must not abort
+    // the navigation before the player can load.
+    ignoreHTTPSErrors: true,
   });
   const page = await context.newPage();
 
