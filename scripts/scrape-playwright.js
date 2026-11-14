@@ -213,7 +213,10 @@ async function scrapeVidSrc(page, tmdbId) {
     }
   });
 
-  const domains = ['https://vidsrc.pm', 'https://vidsrc.to'];
+  // VidSrc moved to vidsrc.sh (2026-11-14): vidsrc.me and vidsrc.to both
+  // redirect/iframe to .sh now, and vidsrc.pm answers HTTP 520 — the
+  // old first domain is dead. .pm/.to stay as fallbacks only.
+  const domains = ['https://vidsrc.sh', 'https://vidsrc.pm', 'https://vidsrc.to'];
 
   for (const domain of domains) {
     try {
